@@ -1,1 +1,16 @@
 Teste de API 
+### Quickstart
+# 1) Banco
+docker compose up -d       # Postgres opcional (recomendado p/ seed grande)
+export DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/social"
+# ou deixe sem export para usar SQLite local
+
+# 2) Install & Run
+poetry install --no-root
+poetry run uvicorn app.main:app --reload
+
+# 3) Documentação interativa
+http://localhost:8000/docs
+
+# 4) Seed (1000 usuários x 1000 posts)
+poetry run python -m scripts.seed
