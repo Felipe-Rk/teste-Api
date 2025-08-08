@@ -12,9 +12,16 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)):
     # checagens simples de unicidade
     if db.scalar(select(func.count()).select_from(models.User).where(models.User.username == payload.username)):
         raise HTTPException(400, "username já cadastrado")
+
     if db.scalar(select(func.count()).select_from(models.User).where(models.User.email == payload.email)):
         raise HTTPException(400, "email já cadastrado")
-    user = models.User(username=payload.username, email=payload.email, posts_count=payload.posts or 0)
+
+    user = models.User(
+        username=payload.username, 
+        email=payload.email, 
+        posts_count=payload.posts or 0,
+        )
+    
     db.add(user)
     db.commit()
     db.refresh(user)
