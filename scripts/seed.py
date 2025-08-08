@@ -1,100 +1,51 @@
-# scripts/seed.py
+# scripts/seed.py (trechos principais)
 import os
-import math
-import argparse
-from faker import Faker
-from sqlalchemy import insert, text
-from sqlalchemy.orm import Session
-from app.db import engine, Base
+from tqdm import tqdm
+from sqlalchemy import insert
+from app.db import SessionLocal
 from app import models
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--users", type=int, default=int(os.getenv("USERS", 1000)))
-    p.add_argument("--posts-per-user", type=int, default=int(os.getenv("POSTS_PER_USER", 1000)))
-    p.add_argument("--batch-size", type=int, default=int(os.getenv("BATCH_SIZE", 10000)))
-    return p.parse_args()
+USERS = int(os.getenv("USERS", 100))
+POSTS_PER_USER = int(os.getenv("POSTS_PER_USER", 50))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", 10000))
 
-def create_users(db: Session, qty: int, fake: Faker) -> list[int]:
-    rows = []
-    for i in range(qty):
-        rows.append({
-            "username": f"{fake.user_name()}_{i}",
-            "email": f"user_{i}@example.com",
-            "posts_count": 0,
-        })
-    # insert em lote e retornar ids
-    result = db.execute(
-        insert(models.User).returning(models.User.id),
-        rows
-    )
-    return [r[0] for r in result.fetchall()]
+def gen_users(n):
+    for i in range(n):
+        yield {"username": f"user{i}", "email": f"user{i}@example.com"}
 
-def seed_posts(db: Session, user_ids: list[int], posts_per_user: int, batch_size: int, fake: Faker):
-    total_posts = len(user_ids) * posts_per_user
-    print(f"Gerando {total_posts:,} posts...")
+def gen_posts(user_id, n):
+    for j in range(n):
+        yield {"user_id": user_id, "title": f"Post {j} - u{user_id}", "content": "..."}
 
-    batch = []
-    written = 0
-
-    for uid in user_ids:
-        for _ in range(posts_per_user):
-            batch.append({
-                "user_id": uid,
-                "content": fake.text(max_nb_chars=120),
-                "likes": 0,
-                # created_at = default no banco (func.now())
-            })
-            if len(batch) >= batch_size:
-                db.execute(insert(models.Post), batch)
-                written += len(batch)
-                batch.clear()
-                # atualização do contador do usuário em massa
-                # otimização simples: faz depois via UPDATE agregando
-                print(f"... {written:,}/{total_posts:,}")
-
-    if batch:
-        db.execute(insert(models.Post), batch)
-        written += len(batch)
-        print(f"... {written:,}/{total_posts:,}")
-
-    # Atualiza posts_count de todos os users de uma vez (Postgres)
-    db.execute(text("""
-        UPDATE users u
-        SET posts_count = p.cnt
-        FROM (
-            SELECT user_id, COUNT(*)::int AS cnt
-            FROM posts
-            GROUP BY user_id
-        ) p
-        WHERE p.user_id = u.id
-    """))
+def bulk_insert(conn, table, rows, batch_size=BATCH_SIZE):
+    buf = []
+    for r in rows:
+        buf.append(r)
+        if len(buf) >= batch_size:
+            conn.execute(insert(table), buf)
+            buf.clear()
+    if buf:
+        conn.execute(insert(table), buf)
 
 def main():
-    args = parse_args()
-    fake = Faker()
+    assert "postgresql" in os.getenv("DATABASE_URL", ""), "Seed grande exige Postgres"
 
-    # Cria schema
-    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as session, session.begin():
+        # Usuários com progresso
+        print(f"Gerando {USERS} usuários...")
+        bulk_insert(session, models.User.__table__, tqdm(gen_users(USERS), total=USERS))
 
-    # Otimizações por backend
-    with engine.connect() as conn:
-        if engine.url.get_backend_name().startswith("sqlite"):
-            conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-            conn.exec_driver_sql("PRAGMA synchronous=OFF;")
-        conn.commit()
+    # Posts por usuário com progresso aninhado
+    with SessionLocal() as session, session.begin():
+        print(f"Gerando {USERS * POSTS_PER_USER:,} posts ({POSTS_PER_USER} por usuário)...")
+        # barra externa por usuário
+        for u_id in tqdm(range(1, USERS + 1), total=USERS, desc="Usuários"):
+            posts_iter = gen_posts(u_id, POSTS_PER_USER)
+            # barra interna por posts do usuário
+            posts_iter = tqdm(posts_iter, total=POSTS_PER_USER, leave=False, desc=f"u{u_id:05d}")
+            bulk_insert(session, models.Post.__table__, posts_iter)
 
-    with Session(engine, autoflush=False, expire_on_commit=False) as db:
-        # Users
-        print(f"Gerando {args.users:,} usuários...")
-        user_ids = create_users(db, args.users, fake)
-        db.commit()
-        print("Usuários ok.")
-
-        # Posts em lote
-        seed_posts(db, user_ids, args.posts_per_user, args.batch_size, fake)
-        db.commit()
-        print("Seed finalizado.")
-
+    print("Seed concluído.")
+    
 if __name__ == "__main__":
     main()
